@@ -1,0 +1,17 @@
+timestamp,phase,devices_cached,notes
+2025-11-09T23:07:46.912473,baseline,5,Normal operation
+2025-11-09T23:07:58.382186,failure,5,Consumer stopped
+2025-11-09T23:08:03.391830,downtime,5,Downtime 5s
+2025-11-09T23:08:08.397261,downtime,5,Downtime 10s
+2025-11-09T23:08:13.399680,downtime,5,Downtime 15s
+2025-11-09T23:08:18.402453,downtime,5,Downtime 20s
+2025-11-09T23:08:23.422185,downtime,5,Downtime 25s
+2025-11-09T23:08:28.425323,downtime,5,Downtime 30s
+2025-11-09T23:08:33.428467,downtime,5,Downtime 35s
+2025-11-09T23:08:38.431970,downtime,5,Downtime 40s
+2025-11-09T23:08:43.437244,downtime,5,Downtime 45s
+2025-11-09T23:08:48.440296,downtime,5,Downtime 50s
+2025-11-09T23:08:53.444639,downtime,5,Downtime 55s
+2025-11-09T23:08:58.447239,downtime,5,Downtime 60s
+2025-11-09T23:09:09.246416,recovery_start,5,Consumer restarted
+2025-11-09T23:09:14.253844,recovered,5,Full recovery in 5s

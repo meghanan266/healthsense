@@ -1,6 +1,7 @@
 package main
 
-import ("context"
+import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -32,19 +33,37 @@ type Metrics struct {
 	Steps     int     `json:"steps"`
 }
 
+var globalMetrics *MetricsTracker
+
 func main() {
 	// Command-line flags
 	broker := flag.String("broker", "tcp://localhost:1883", "MQTT broker URL")
 	numDevices := flag.Int("devices", 5, "Number of simulated devices")
 	interval := flag.Duration("interval", 2*time.Second, "Publishing interval")
 	tenantID := flag.String("tenant", "acme-clinic", "Tenant ID")
+	duration := flag.Duration("duration", 0, "Test duration (0 = infinite)")
+	metricsFile := flag.String("metrics", "simulator-metrics.csv", "Metrics output file")
 	flag.Parse()
 
-	log.Printf("Starting HealthSense Simulator")
+	log.Printf("🚀 Starting HealthSense Simulator")
 	log.Printf("   Broker: %s", *broker)
 	log.Printf("   Devices: %d", *numDevices)
 	log.Printf("   Interval: %v", *interval)
 	log.Printf("   Tenant: %s", *tenantID)
+	if *duration > 0 {
+		log.Printf("   Duration: %v", *duration)
+	}
+
+	// Initialize metrics
+	var err error
+	globalMetrics, err = NewMetrics(*metricsFile)
+	if err != nil {
+		log.Fatalf("❌ Failed to initialize metrics: %v", err)
+	}
+	defer globalMetrics.Flush()
+
+	// Start metrics reporter
+	go metricsReporter()
 
 	// MQTT client options
 	opts := mqtt.NewClientOptions()
@@ -57,13 +76,22 @@ func main() {
 	// Connect to broker
 	client := mqtt.NewClient(opts)
 	if token := client.Connect(); token.Wait() && token.Error() != nil {
-		log.Fatalf("Failed to connect to broker: %v", token.Error())
+		log.Fatalf("❌ Failed to connect to broker: %v", token.Error())
 	}
-	log.Printf("Connected to MQTT broker")
+	log.Printf("✅ Connected to MQTT broker")
 
 	// Wait group for graceful shutdown
 	var wg sync.WaitGroup
 	ctx, cancel := context.WithCancel(context.Background())
+
+	// If duration is set, auto-cancel after duration
+	if *duration > 0 {
+		go func() {
+			time.Sleep(*duration)
+			log.Println("⏰ Test duration reached, shutting down...")
+			cancel()
+		}()
+	}
 
 	// Start device goroutines
 	for i := 0; i < *numDevices; i++ {
@@ -75,13 +103,21 @@ func main() {
 	// Wait for interrupt signal
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-	<-sigChan
+	
+	select {
+	case <-sigChan:
+		log.Println("🛑 Received interrupt signal...")
+	case <-ctx.Done():
+		log.Println("🛑 Context cancelled...")
+	}
 
-	log.Println("Shutting down simulator...")
 	cancel()
 	wg.Wait()
 	client.Disconnect(250)
-	log.Println("Simulator stopped")
+	
+	// Print final metrics
+	globalMetrics.PrintStats()
+	log.Println("✅ Simulator stopped")
 }
 
 func publishTelemetry(ctx context.Context, wg *sync.WaitGroup, client mqtt.Client, tenantID, deviceID string, interval time.Duration) {
@@ -90,10 +126,10 @@ func publishTelemetry(ctx context.Context, wg *sync.WaitGroup, client mqtt.Clien
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	// Initialize baseline vitals (realistic values)
-	baseHR := 70 + rand.Intn(30)      // 70-100 bpm
-	baseTemp := 36.5 + rand.Float64() // 36.5-37.5°C
-	baseSpO2 := 95 + rand.Intn(5)     // 95-100%
+	// Initialize baseline vitals
+	baseHR := 70 + rand.Intn(30)
+	baseTemp := 36.5 + rand.Float64()
+	baseSpO2 := 95 + rand.Intn(5)
 	steps := 0
 
 	for {
@@ -101,46 +137,63 @@ func publishTelemetry(ctx context.Context, wg *sync.WaitGroup, client mqtt.Clien
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			// Generate telemetry with small variations
+			startTime := time.Now()
+
+			// Generate telemetry
 			telemetry := Telemetry{
 				TenantID:  tenantID,
 				DeviceID:  deviceID,
 				Timestamp: time.Now().UTC().Format(time.RFC3339),
 				Metrics: Metrics{
-					HeartRate: baseHR + rand.Intn(21) - 10,              // ±10 bpm
-					TempC:     baseTemp + (rand.Float64()*0.4 - 0.2),   // ±0.2°C
-					SpO2:      baseSpO2 + rand.Intn(3) - 1,              // ±1%
-					Steps:     steps + rand.Intn(50),                    // incremental
+					HeartRate: baseHR + rand.Intn(21) - 10,
+					TempC:     baseTemp + (rand.Float64()*0.4 - 0.2),
+					SpO2:      baseSpO2 + rand.Intn(3) - 1,
+					Steps:     steps + rand.Intn(50),
 				},
-				BatteryPct: 100 - rand.Intn(30), // 70-100%
+				BatteryPct: 100 - rand.Intn(30),
 				FWVersion:  "1.3.2",
 			}
 			steps = telemetry.Metrics.Steps
 
 			// Occasionally simulate anomalies (10% chance)
 			if rand.Float32() < 0.1 {
-				telemetry.Metrics.HeartRate = 150 + rand.Intn(30) // Tachycardia
-				telemetry.Metrics.TempC = 38.0 + rand.Float64()   // Fever
+				telemetry.Metrics.HeartRate = 150 + rand.Intn(30)
+				telemetry.Metrics.TempC = 38.0 + rand.Float64()
 			}
 
-			// Publish to MQTT
+			// Publish
 			topic := fmt.Sprintf("tenants/%s/devices/%s/telemetry", tenantID, deviceID)
 			payload, _ := json.Marshal(telemetry)
 
 			token := client.Publish(topic, 1, false, payload)
 			token.Wait()
 
-			if token.Error() != nil {
-				log.Printf("[%s] Publish error: %v", deviceID, token.Error())
-			} else {
-				log.Printf("[%s] HR:%d Temp:%.1f SpO2:%d Steps:%d",
-					deviceID,
-					telemetry.Metrics.HeartRate,
-					telemetry.Metrics.TempC,
-					telemetry.Metrics.SpO2,
-					telemetry.Metrics.Steps,
-				)
+			latencyMs := time.Since(startTime).Milliseconds()
+			success := token.Error() == nil
+
+			// Record metrics
+			globalMetrics.RecordPublish(deviceID, latencyMs, success)
+
+			if !success {
+				log.Printf("❌ [%s] Publish error: %v", deviceID, token.Error())
 			}
 		}
+	}
+}
+
+// metricsReporter prints stats every 10 seconds
+func metricsReporter() {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		stats := globalMetrics.GetStats()
+		log.Printf("📊 Throughput: %.0f msg/s | Published: %d | Errors: %d | Avg Latency: %dms | P95: %dms",
+			stats["messages_per_sec"],
+			stats["total_published"],
+			stats["total_errors"],
+			stats["avg_latency_ms"],
+			stats["p95_latency_ms"],
+		)
 	}
 }
